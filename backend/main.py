@@ -10,11 +10,10 @@ import random
 import math
 import base64
 import os
-import google.generativeai as genai
+from groq import Groq
 
-gemini_api_key = os.getenv("GEMINI_API_KEY")
-if gemini_api_key:
-    genai.configure(api_key=gemini_api_key)
+groq_api_key = os.getenv("GROQ_API_KEY")
+groq_client = Groq(api_key=groq_api_key) if groq_api_key else None
 
 # Create tables if not exist (mostly handled by seed, but good to have)
 Base.metadata.create_all(bind=engine)
@@ -232,31 +231,38 @@ def predict_segment_risk(segment_id: int, db: Session = Depends(get_db)):
 @app.post("/api/vision/analyze")
 async def analyze_vision(req: VisionRequest):
     try:
+        if groq_client is None:
+            return {"description": "[AI VISION ERROR] Groq API key is not configured."}
+
         if "," in req.photo_url:
-            mime_type = req.photo_url.split(";")[0].split(":")[1]
-            base64_data = req.photo_url.split(",")[1]
+            header, base64_data = req.photo_url.split(",", 1)
+            mime_type = header.split(";")[0].split(":")[1] if ":" in header else "image/jpeg"
         else:
             mime_type = "image/jpeg"
             base64_data = req.photo_url
-            
-        image_bytes = base64.b64decode(base64_data)
-        
-        model = genai.GenerativeModel('gemini-1.5-flash')
+
+        base64.b64decode(base64_data, validate=True)
+        image_url = f"data:{mime_type};base64,{base64_data}"
         prompt = f"You are an AI computer vision agent for a logistics dashboard in the North Eastern Region of India. The field officer has selected the incident type as '{req.incident_type}'. Analyze this image and provide a highly technical, realistic assessment of what you see. Keep it under 3 sentences. Start with '[AI VISION REPORT] Analysis:'."
-        
-        image_parts = [
-            {
-                "mime_type": mime_type,
-                "data": image_bytes
-            }
-        ]
-        
-        response = model.generate_content([prompt, image_parts[0]])
-        desc = response.text.strip()
-        return {"description": desc}
-    except Exception as e:
-        print(f"Vision API Error: {e}")
-        return {"description": f"[AI VISION ERROR] Could not process image. Fallback logic engaged."}
+
+        response = groq_client.chat.completions.create(
+            model=os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                }
+            ],
+            max_tokens=300,
+            temperature=0.2,
+        )
+        description = response.choices[0].message.content.strip()
+        return {"description": description}
+    except Exception:
+        return {"description": "[AI VISION ERROR] Could not process image. Fallback logic engaged."}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
